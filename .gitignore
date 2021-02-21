@@ -1,0 +1,9 @@
+data/
+__pycache__/
+.mypy_cache/
+.ipynb_checkpoints/
+daily_state.json
+momentum_strategy/apikey.sh
+*egg-info
+momentum_strategy/*.csv
+results/
