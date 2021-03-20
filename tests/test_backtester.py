@@ -2,7 +2,13 @@ import unittest
 import numpy as np
 import pandas as pd
 from copy import deepcopy
-from simple_backtester.backtester import BackTester, Action, _rebalance_position
+from simple_backtester.backtester import (
+    BackTester,
+    Action,
+    _rebalance_position,
+    _init_ledger,
+    update_ledger,
+)
 
 
 mock_strat = pd.DataFrame(
@@ -50,6 +56,7 @@ class TestBacktester(unittest.TestCase):
     def setUp(self):
         self.maxDiff = None
         self.strat = mock_strat.copy()
+        self.ledger = _init_ledger()
         self.test_date = pd.to_datetime("2020-05-10")
         self.df = self.strat.query("date == @self.test_date").reset_index(drop=True)
         self.yesterdays_summary = {
@@ -101,7 +108,7 @@ class TestBacktester(unittest.TestCase):
                 },
             }
         }
-        _rebalance_position(self.df, 1, to_rebalance)
+        _rebalance_position(self.df, 1, to_rebalance, self.ledger)
         self.assertDictEqual(to_rebalance, rebalanced)
         self.assertEqual(self.df.at[1, "value"], 50 * 34)
         self.assertEqual(self.df.at[1, "num_shares"], 34)
@@ -121,7 +128,21 @@ class TestBacktester(unittest.TestCase):
                 },
             }
         }
-        _rebalance_position(self.df, 1, to_rebalance)
+        update_ledger(
+            self.ledger,
+            symbol="A",
+            num_shares=60,
+            close=10,
+            date=pd.to_datetime("2018-01-01"),
+        )
+        update_ledger(
+            self.ledger,
+            symbol="B",
+            num_shares=8,
+            close=50.0,
+            date=pd.to_datetime("2018-01-01"),
+        )
+        _rebalance_position(self.df, 1, to_rebalance, self.ledger)
         self.assertDictEqual(to_rebalance, rebalanced)
         self.assertEqual(self.df.at[1, "value"], 8 * 50)
         self.assertEqual(self.df.at[1, "num_shares"], 8)
@@ -141,7 +162,7 @@ class TestBacktester(unittest.TestCase):
                 },
             }
         }
-        _rebalance_position(self.df, 1, to_rebalance)
+        _rebalance_position(self.df, 1, to_rebalance, self.ledger)
         self.assertDictEqual(to_rebalance, rebalanced)
         self.assertEqual(self.df.at[1, "value"], 13 * 50)
         self.assertEqual(self.df.at[1, "num_shares"], 13)
@@ -151,26 +172,3 @@ class TestBacktester(unittest.TestCase):
         backtester = BackTester(self.simple_strategy, 1000.00)
         target_metrics = {"annual_return": -0.11}
         self.assertDictEqual(backtester.metrics, target_metrics)
-
-    @unittest.skip("")
-    def test_summarize_investments(self):
-        backtester = BackTester(self.strat, 1000.00)
-        # summary = summarize_investments(backtester.daily_state)
-        summary = None
-        expected_summary = pd.DataFrame(
-            [
-                {
-                    "buy_date": pd.to_datetime("2020-01-01"),
-                    "sell_date": pd.to_datetime("2020-01-02"),
-                    "days_held": 0,
-                    "symbol": "A",
-                    "purchase_price": 5,
-                    "sell_price": 9,
-                    "raw_return": 4,
-                    "tax": 1,
-                    "net_return": 3,
-                    "fees": 0,
-                }
-            ]
-        )
-        pd.testing.assert_frame_equal(summary, expected_summary, check_like=True)

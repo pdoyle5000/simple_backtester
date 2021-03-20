@@ -1,5 +1,4 @@
-from typing_extensions import Protocol
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import pandas as pd
 import numpy as np
 from enum import Enum, unique
@@ -10,6 +9,10 @@ from tqdm import tqdm
 from simple_backtester.metrics import annual_return
 
 
+FINRA_FEE = 0.0000051
+AGG_SALES_FEE = 0.000119
+
+
 @unique
 class Action(Enum):
     hold = 1
@@ -17,7 +20,7 @@ class Action(Enum):
     buy = 3
 
 
-def sell(df: pd.DataFrame, i: int, daily_state: dict) -> None:
+def sell(df: pd.DataFrame, i: int, daily_state: dict, ledger: pd.DataFrame) -> None:
     date = df.at[i, "date"]
     symbol = df.at[i, "symbol"]
     num_shares = daily_state[date]["shares_owned"][symbol]["num_shares"]
@@ -35,14 +38,16 @@ def sell(df: pd.DataFrame, i: int, daily_state: dict) -> None:
     df.at[i, "num_shares"] = num_shares
     daily_state[date]["shares_owned"].pop(symbol)
 
+    # update ledger
+    update_ledger(ledger, symbol=symbol, date=date, num_shares=-num_shares, close=close)
+
     # update total
     daily_state[date]["total"] = (
         daily_state[date]["investments"] + daily_state[date]["cash"]
     )
-    print(f"Selling {symbol}")
 
 
-def buy(df: pd.DataFrame, i: int, daily_state: dict) -> None:
+def buy(df: pd.DataFrame, i: int, daily_state: dict, ledger: pd.DataFrame) -> None:
     # calculate the number of shares to buy
     date = df.at[i, "date"]
     day_start_total = daily_state[date]["total"]
@@ -63,19 +68,26 @@ def buy(df: pd.DataFrame, i: int, daily_state: dict) -> None:
     # subtract from cash
     daily_state[date]["cash"] -= value
 
+    # update ledger
+    update_ledger(ledger, symbol=symbol, date=date, num_shares=num_shares, close=close)
+
     # update total
     daily_state[date]["total"] = (
         daily_state[date]["cash"] + daily_state[date]["investments"]
     )
-    print(f"Buying {symbol}")
 
 
-def hold(df: pd.DataFrame, i: int, daily_state: dict) -> None:
-    # future upgrade: if the DF is all holds, dont rebalance.
-    _rebalance_position(df, i, daily_state)
+def hold(
+    df: pd.DataFrame, i: int, daily_state: dict, rebalance_df: pd.DataFrame
+) -> None:
+    # instead of rebalancing every day, set a cadence.
+    # if no rebalance, just update hold totals.
+    _rebalance_position(df, i, daily_state, rebalance_df)
 
 
-def _rebalance_position(df: pd.DataFrame, i: int, daily_state: dict) -> None:
+def _rebalance_position(
+    df: pd.DataFrame, i: int, daily_state: dict, ledger: pd.DataFrame
+) -> None:
     # calculate an updated total for weighting
     date = df.at[i, "date"]
     total = daily_state[date]["cash"]
@@ -99,6 +111,17 @@ def _rebalance_position(df: pd.DataFrame, i: int, daily_state: dict) -> None:
     new_num_shares = int((total * rebalance_weight) // todays_close)
     new_investment = new_num_shares * todays_close
 
+    share_diff = new_num_shares - old_num_shares
+    if share_diff != 0:
+        update_ledger(
+            ledger,
+            symbol=symbol,
+            date=date,
+            num_shares=share_diff,
+            close=todays_close,
+            is_rebalance=True,
+        )
+
     # update cash total
     daily_state[date]["cash"] -= (new_num_shares - old_num_shares) * todays_close
 
@@ -113,19 +136,127 @@ def _rebalance_position(df: pd.DataFrame, i: int, daily_state: dict) -> None:
     df.at[i, "num_shares"] = new_num_shares
 
 
+def update_ledger(
+    ledger: pd.DataFrame,
+    *,
+    symbol: str,
+    num_shares: int,
+    date: datetime,
+    close: float,
+    is_rebalance: bool = False,
+) -> None:
+    gain: float = np.nan
+    tax: float = np.nan
+    fees: float = np.nan
+    action: Action = Action.buy
+    if num_shares < 0:
+        action = Action.sell
+        gain = _calculate_gains(ledger, symbol, abs(num_shares), close)
+        tax = gain * 0.22
+        fees = (FINRA_FEE * close * abs(num_shares)) + (
+            AGG_SALES_FEE * close * abs(num_shares)
+        )
+
+    transaction = {
+        "date": date,
+        "symbol": symbol,
+        "action": action,
+        "close": close,
+        "num_shares": abs(num_shares),
+        "gain": gain,
+        "tax": tax,
+        "fees": fees,
+        "net_gain": gain - tax - fees,
+        "shares_owned": abs(num_shares),  # Stateful
+        "is_rebalance": is_rebalance,
+    }
+    ledger.loc[len(ledger)] = transaction
+
+
+def _calculate_gains(
+    ledger: pd.DataFrame, symbol: str, num_shares: int, close: float
+) -> float:
+    buy_list = ledger.query(
+        "symbol == @symbol and action == @Action.buy and shares_owned > 0"
+    )
+    shares_left_to_sell = abs(num_shares)
+
+    if buy_list.shares_owned.sum() < shares_left_to_sell:
+        raise ValueError("Trying to sell more shares than you own.")
+    gain: float = 0.0
+    for i, row in buy_list.iterrows():
+        if row.num_shares >= shares_left_to_sell:
+            gain += shares_left_to_sell * (close - row.close)
+            ledger.at[i, "shares_owned"] -= shares_left_to_sell
+            return gain
+        shares_owned = ledger.at[i, "shares_owned"]
+        gain += shares_owned * (close - row.close)
+        shares_left_to_sell -= shares_owned
+        ledger.at[i, "shares_owned"] = 0
+
+    # should never get here.
+    return gain
+
+
+# hunt through df for the last time the stock was purchased.
+def _init_ledger() -> pd.DataFrame:
+    return (
+        pd.DataFrame(
+            columns=[
+                "date",
+                "symbol",
+                "action",
+                "close",
+                "num_shares",
+                "gain",
+                "tax",
+                "fees",
+                "net_gain",
+                "shares_owned",
+                "is_rebalance",
+            ],
+            index=[0],
+        )
+        .dropna()
+        .astype(
+            {
+                "symbol": "str",
+                "close": "float",
+                "num_shares": "int",
+                "shares_owned": "int",
+                "is_rebalance": "bool",
+            }
+        )
+        .reset_index(drop=True)
+    )
+
+
 class BackTester:
-    def __init__(self, strategy: pd.DataFrame, bankroll: float):
-        dependent_cols = ["symbol", "weight", "action", "date", "close"]
+    def __init__(
+        self,
+        strategy: pd.DataFrame,
+        bankroll: float,
+        start_date: Optional[str] = None,
+        buy_col: str = "close",
+        sell_col: str = "close",
+    ):
+        dependent_cols = list(
+            set(["symbol", "weight", "action", "date", buy_col, sell_col])
+        )
         for col in dependent_cols:
             if col not in strategy:
                 print(f"{col} does not exist, cannot execute backtest.")
                 raise (KeyError)
         self.bankroll = bankroll
+        self.buy_col = buy_col
+        self.sell_col = sell_col
+
+        if start_date:
+            start = pd.to_datetime(start_date)  # noqa: F841
+            self.strategy = strategy.query("date > @start")
+        self.ledger = _init_ledger()
         self.data, self.daily_state = self.execute_backtest(strategy)
         self.metrics = self.calculate_metrics(self.daily_state)
-        # self.ledger = init_ledger()  TODO
-        # create a ledger class that holds all the accounting details
-        # for every transaction.
 
     def init_execution_cols(self, strat_df: pd.DataFrame) -> None:
         strat_df["action"] = pd.Categorical(
@@ -157,7 +288,7 @@ class BackTester:
                 day=day, strat_df=strat_df, today_df=df, daily_state=daily_state
             )
             for i, row in df.iterrows():
-                action_map[row.action](df, i, daily_state)
+                action_map[row.action](df, i, daily_state, self.ledger)
 
             daily_actions_df = pd.concat([daily_actions_df, df]).reset_index(drop=True)
 
