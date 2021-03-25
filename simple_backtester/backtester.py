@@ -326,7 +326,7 @@ def _seed_today(
 
 
 def _get_previous_day(day: datetime, daily_state: dict) -> datetime:
-    for days_before in range(1, 100):  # some impossible range.
+    for days_before in range(1, 500):  # some impossible range.
         if day - timedelta(days=days_before) in daily_state:
             return day - timedelta(days=days_before)
     return day

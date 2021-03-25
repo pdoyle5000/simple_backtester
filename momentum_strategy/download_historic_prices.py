@@ -131,6 +131,10 @@ if __name__ == "__main__":
     print(f"Using API key {api_key}")
     os.makedirs("../data/", exist_ok=True)
 
+    qqqspy = pd.DataFrame({"symbol": ["QQQ", "SPY"]})
+    get_daily_prices(api_key, BASEURL, historical=qqqspy).to_csv(
+        f"QQQ_SPY.csv", index=False
+    )
     for index in ["dowjones", "nasdaq", "sp500"]:
         print(f"Downloading {index.upper()}")
         listing = get_index_listing(api_key, BASEURL, index=index, historical=True)
